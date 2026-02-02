@@ -3,32 +3,22 @@ import subprocess
 import asyncio
 import sys
 import os
+import ctypes
+from ctypes import wintypes
 from collections import deque
 from dotenv import load_dotenv
 
-# --- LOAD CONFIGURATION ---
-# This looks for the .env file and loads it
+# --- CONFIGURATION ---
 load_dotenv()
-
 TOKEN = os.getenv('DISCORD_TOKEN')
-# We must convert the ID to an integer for Discord
 try:
     CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
-except TypeError:
-    print("ERROR: DISCORD_CHANNEL_ID not found in .env file.")
-    sys.exit(1)
+except:
+    sys.exit("Error: Check DISCORD_CHANNEL_ID")
 
 SERVER_PATH = os.getenv('TERRARIA_EXE_PATH')
-# This points to the config file we just made in the same folder as the script
 SERVER_ARGS = ['-config', 'serverconfig.txt']
 
-# --- VALIDATION ---
-if not TOKEN or not SERVER_PATH:
-    print("ERROR: specific variables missing from .env file.")
-    print("Ensure you have DISCORD_TOKEN and TERRARIA_EXE_PATH set.")
-    sys.exit(1)
-
-# SECURITY: Discord commands allowed
 ALLOWED_COMMANDS = {
     '!save': 'save',
     '!playing': 'playing',
@@ -39,6 +29,81 @@ ALLOWED_COMMANDS = {
     '!settle': 'settle'
 }
 
+# --- WINDOWS KERNEL CONSTANTS ---
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+STD_INPUT_HANDLE = -10
+KEY_EVENT = 0x0001
+
+# Define C Structures for Input Injection
+class KEY_EVENT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("bKeyDown", wintypes.BOOL),
+        ("wRepeatCount", wintypes.WORD),
+        ("wVirtualKeyCode", wintypes.WORD),
+        ("wVirtualScanCode", wintypes.WORD),
+        ("uChar", ctypes.c_wchar), # Unicode character
+        ("dwControlKeyState", wintypes.DWORD),
+    ]
+
+class INPUT_RECORD_EVENT(ctypes.Union):
+    _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
+
+class INPUT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("EventType", wintypes.WORD),
+        ("Event", INPUT_RECORD_EVENT),
+    ]
+
+# --- THE MAGIC FUNCTION ---
+def inject_input(pid, text):
+    """
+    Attaches to the Terraria console and injects keystrokes directly 
+    into the buffer. Does NOT require window focus.
+    """
+    if not pid: return False
+    
+    # 1. Detach from our own console (so we can attach to the server's)
+    kernel32.FreeConsole()
+    
+    # 2. Attach to the Server's Console
+    if not kernel32.AttachConsole(pid):
+        print("Failed to attach to server console.")
+        return False
+        
+    # 3. Get the Input Handle of that console
+    hStdIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+    
+    # 4. Create the records (Key Down + Key Up for every char)
+    records = (INPUT_RECORD * (len(text) * 2))()
+    
+    idx = 0
+    for char in text:
+        # Key Down
+        records[idx].EventType = KEY_EVENT
+        records[idx].Event.KeyEvent.bKeyDown = True
+        records[idx].Event.KeyEvent.wRepeatCount = 1
+        records[idx].Event.KeyEvent.uChar = char
+        idx += 1
+        
+        # Key Up
+        records[idx].EventType = KEY_EVENT
+        records[idx].Event.KeyEvent.bKeyDown = False
+        records[idx].Event.KeyEvent.wRepeatCount = 1
+        records[idx].Event.KeyEvent.uChar = char
+        idx += 1
+        
+    # 5. Write them to the buffer
+    written = wintypes.DWORD(0)
+    kernel32.WriteConsoleInputW(hStdIn, ctypes.byref(records), len(records), ctypes.byref(written))
+    
+    # 6. Detach so we don't crash the bot or the server
+    kernel32.FreeConsole()
+    
+    # 7. Re-allocate a console for Python (Optional, for debugging)
+    # kernel32.AllocConsole() 
+    return True
+
+# --- DISCORD SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True 
 client = discord.Client(intents=intents)
@@ -48,61 +113,50 @@ server_process = None
 
 # --- TASKS ---
 async def read_local_console():
-    """Reads input from the local terminal and forwards it to the server."""
-    print(">>> Local Console Bridge Active. Type commands here directly. <<<")
+    # NOTE: Since we detach/attach consoles, local typing might get buggy.
+    # This function is kept for logic but might lose visibility in VS Code.
     while True:
-        cmd = await asyncio.to_thread(sys.stdin.readline)
-        if cmd:
-            if server_process and server_process.poll() is None:
-                server_process.stdin.write(cmd)
-                server_process.stdin.flush()
-            else:
-                print("Cannot send command: Server is not running.")
+        await asyncio.sleep(1) 
 
 async def run_server_and_capture_output():
     global server_process
-    print(f"Attempting to launch server from: {SERVER_PATH}")
+    print(f"Launching: {SERVER_PATH}")
     
     try:
+        # Launch with a NEW CONSOLE so it has a buffer we can attach to
         server_process = subprocess.Popen(
             [SERVER_PATH] + SERVER_ARGS,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdin=None,                 # Let it manage its own input
+            stdout=subprocess.PIPE,     # We still capture output via pipe
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_CONSOLE, 
             universal_newlines=True,
             bufsize=1,
-            # This ensures the server looks for the config in the current folder
             cwd=os.getcwd() 
         )
         print("Terraria Server Started.")
+        
     except FileNotFoundError:
-        print(f"CRITICAL ERROR: Could not find TerrariaServer.exe at: {SERVER_PATH}")
+        print("CRITICAL ERROR: Executable not found.")
         return
 
     while True:
         if server_process.poll() is not None:
-            remaining = server_process.stdout.read()
-            if remaining: log_queue.append(remaining)
             print("Server has stopped.")
             break
 
         try:
             output = await asyncio.to_thread(server_process.stdout.readline)
             if output:
-                print(output.strip())
                 log_queue.append(output)
+                # Note: 'print' might fail if we are currently attached to the other console
+                # so we rely on Discord logs.
         except Exception as e:
-            print(f"Error reading server output: {e}")
             break
 
 async def send_logs_to_discord():
     await client.wait_until_ready()
     channel = client.get_channel(CHANNEL_ID)
-    
-    if not channel:
-        print(f"CRITICAL: Bot cannot find channel ID {CHANNEL_ID}. Check permissions or ID.")
-        return
-
     while not client.is_closed():
         if log_queue:
             batch = ""
@@ -111,8 +165,8 @@ async def send_logs_to_discord():
             if batch:
                 try:
                     await channel.send(f"```{batch}```")
-                except Exception as e:
-                    print(f"Failed to send log: {e}")
+                except:
+                    pass
         await asyncio.sleep(2)
 
 @client.event
@@ -120,24 +174,31 @@ async def on_message(message):
     if message.author == client.user or message.channel.id != CHANNEL_ID:
         return
 
-    command_text = message.content.lower().strip()
+    content = message.content.strip()
+    command_text = content.lower()
+
+    # The command to send (either the command itself or a 'say' chat)
+    final_cmd = ""
     
-    if command_text in ALLOWED_COMMANDS:
-        terraria_cmd = ALLOWED_COMMANDS[command_text]
-        if server_process and server_process.poll() is None:
-            print(f"[Discord] {message.author}: {terraria_cmd}")
-            server_process.stdin.write(terraria_cmd + "\n")
-            server_process.stdin.flush()
+    if command_text.startswith("!"):
+        if command_text in ALLOWED_COMMANDS:
+            final_cmd = ALLOWED_COMMANDS[command_text]
             await message.add_reaction("✅")
-        else:
-            await message.channel.send("❌ Server is not running.")
+    else:
+        clean_msg = content.replace("\n", " ").replace("\r", "")
+        final_cmd = f"say <Discord-{message.author.display_name}> {clean_msg}"
+
+    # INJECT THE INPUT IF WE HAVE A COMMAND
+    if final_cmd and server_process:
+        # We must add \r (Return) for the server to process the line
+        await asyncio.to_thread(inject_input, server_process.pid, final_cmd + "\r")
 
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
     client.loop.create_task(run_server_and_capture_output())
     client.loop.create_task(send_logs_to_discord())
-    client.loop.create_task(read_local_console())
+    # read_local_console is disabled because console-hopping breaks local input
 
 if __name__ == "__main__":
     client.run(TOKEN)
