@@ -74,6 +74,10 @@ SERVER_ARGS = ['-config', 'serverconfig.txt']
 
 ALLOWED_COMMANDS = {
     '!help': 'help',
+    '!players': 'playing',
+    '!list': 'playing',
+    '!online': 'playing',
+    '!who': 'playing',
     '!playing': 'playing',
     '!time': 'time',
     '!motd': 'motd',
