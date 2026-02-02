@@ -1,109 +1,88 @@
-import discord
-import subprocess
-import asyncio
 import sys
 import os
+import subprocess
 import ctypes
 from ctypes import wintypes
+import time
+import asyncio
 from collections import deque
 from dotenv import load_dotenv
+
+# --- 1. FAST-LOAD CHECK (Injector Mode) ---
+if len(sys.argv) > 1 and sys.argv[1] == "inject":
+    # Kernel Definitions for Injection
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    STD_INPUT_HANDLE = -10
+    KEY_EVENT = 0x0001
+
+    class KEY_EVENT_RECORD(ctypes.Structure):
+        _fields_ = [("bKeyDown", wintypes.BOOL), ("wRepeatCount", wintypes.WORD),
+                    ("wVirtualKeyCode", wintypes.WORD), ("wVirtualScanCode", wintypes.WORD),
+                    ("uChar", ctypes.c_wchar), ("dwControlKeyState", wintypes.DWORD)]
+
+    class INPUT_RECORD_EVENT(ctypes.Union):
+        _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
+
+    class INPUT_RECORD(ctypes.Structure):
+        _fields_ = [("EventType", wintypes.WORD), ("Event", INPUT_RECORD_EVENT)]
+
+    def run_injector(pid, text):
+        try:
+            pid = int(pid)
+            kernel32.FreeConsole()
+            if not kernel32.AttachConsole(pid): return
+            hStdIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+            
+            records = (INPUT_RECORD * (len(text) * 2))()
+            idx = 0
+            for char in text:
+                # Key Down
+                records[idx].EventType = KEY_EVENT
+                records[idx].Event.KeyEvent.bKeyDown = True
+                records[idx].Event.KeyEvent.wRepeatCount = 1
+                records[idx].Event.KeyEvent.uChar = char
+                idx += 1
+                # Key Up
+                records[idx].EventType = KEY_EVENT
+                records[idx].Event.KeyEvent.bKeyDown = False
+                records[idx].Event.KeyEvent.wRepeatCount = 1
+                records[idx].Event.KeyEvent.uChar = char
+                idx += 1
+
+            written = wintypes.DWORD(0)
+            kernel32.WriteConsoleInputW(hStdIn, ctypes.byref(records), len(records), ctypes.byref(written))
+            kernel32.FreeConsole()
+        except:
+            pass
+
+    run_injector(sys.argv[2], sys.argv[3])
+    sys.exit(0)
+
+# ==========================================
+# --- MAIN BOT MODE ---
+# ==========================================
+
+import discord
+import msvcrt # <--- REQUIRED for non-blocking input on Windows
 
 # --- CONFIGURATION ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-try:
-    CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
-except:
-    sys.exit("Error: Check DISCORD_CHANNEL_ID")
-
+CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID', 0))
 SERVER_PATH = os.getenv('TERRARIA_EXE_PATH')
 SERVER_ARGS = ['-config', 'serverconfig.txt']
 
 ALLOWED_COMMANDS = {
-    '!save': 'save',
+    '!help': 'help',
     '!playing': 'playing',
-    '!morning': 'dawn',
-    '!noon': 'noon',
-    '!night': 'dusk',
-    '!midnight': 'midnight',
-    '!settle': 'settle'
+    '!time': 'time',
+    '!motd': 'motd',
+    '!seed': 'seed',
+    '!version': 'version',
+    '!password': 'password',
+    '!maxplayers': 'maxplayers'
 }
 
-# --- WINDOWS KERNEL CONSTANTS ---
-kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-STD_INPUT_HANDLE = -10
-KEY_EVENT = 0x0001
-
-# Define C Structures for Input Injection
-class KEY_EVENT_RECORD(ctypes.Structure):
-    _fields_ = [
-        ("bKeyDown", wintypes.BOOL),
-        ("wRepeatCount", wintypes.WORD),
-        ("wVirtualKeyCode", wintypes.WORD),
-        ("wVirtualScanCode", wintypes.WORD),
-        ("uChar", ctypes.c_wchar), # Unicode character
-        ("dwControlKeyState", wintypes.DWORD),
-    ]
-
-class INPUT_RECORD_EVENT(ctypes.Union):
-    _fields_ = [("KeyEvent", KEY_EVENT_RECORD)]
-
-class INPUT_RECORD(ctypes.Structure):
-    _fields_ = [
-        ("EventType", wintypes.WORD),
-        ("Event", INPUT_RECORD_EVENT),
-    ]
-
-# --- THE MAGIC FUNCTION ---
-def inject_input(pid, text):
-    """
-    Attaches to the Terraria console and injects keystrokes directly 
-    into the buffer. Does NOT require window focus.
-    """
-    if not pid: return False
-    
-    # 1. Detach from our own console (so we can attach to the server's)
-    kernel32.FreeConsole()
-    
-    # 2. Attach to the Server's Console
-    if not kernel32.AttachConsole(pid):
-        print("Failed to attach to server console.")
-        return False
-        
-    # 3. Get the Input Handle of that console
-    hStdIn = kernel32.GetStdHandle(STD_INPUT_HANDLE)
-    
-    # 4. Create the records (Key Down + Key Up for every char)
-    records = (INPUT_RECORD * (len(text) * 2))()
-    
-    idx = 0
-    for char in text:
-        # Key Down
-        records[idx].EventType = KEY_EVENT
-        records[idx].Event.KeyEvent.bKeyDown = True
-        records[idx].Event.KeyEvent.wRepeatCount = 1
-        records[idx].Event.KeyEvent.uChar = char
-        idx += 1
-        
-        # Key Up
-        records[idx].EventType = KEY_EVENT
-        records[idx].Event.KeyEvent.bKeyDown = False
-        records[idx].Event.KeyEvent.wRepeatCount = 1
-        records[idx].Event.KeyEvent.uChar = char
-        idx += 1
-        
-    # 5. Write them to the buffer
-    written = wintypes.DWORD(0)
-    kernel32.WriteConsoleInputW(hStdIn, ctypes.byref(records), len(records), ctypes.byref(written))
-    
-    # 6. Detach so we don't crash the bot or the server
-    kernel32.FreeConsole()
-    
-    # 7. Re-allocate a console for Python (Optional, for debugging)
-    # kernel32.AllocConsole() 
-    return True
-
-# --- DISCORD SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True 
 client = discord.Client(intents=intents)
@@ -111,23 +90,69 @@ client = discord.Client(intents=intents)
 log_queue = deque()
 server_process = None 
 
-# --- TASKS ---
+async def send_command_to_server(cmd_text):
+    """Spawns the lightweight injector."""
+    if not server_process:
+        print("❌ Server not running.")
+        return
+
+    full_cmd = cmd_text + "\r"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, __file__, "inject", str(server_process.pid), full_cmd
+        )
+        await proc.wait()
+    except Exception as e:
+        print(f"Failed to spawn injector: {e}")
+
 async def read_local_console():
-    # NOTE: Since we detach/attach consoles, local typing might get buggy.
-    # This function is kept for logic but might lose visibility in VS Code.
+    """
+    NON-BLOCKING INPUT READER using msvcrt.
+    This prevents the bot from freezing while waiting for you to type.
+    """
+    print(">>> Local Console Active. Type commands here. <<<")
+    
+    cmd_buffer = []
+    
     while True:
-        await asyncio.sleep(1) 
+        # 1. Check if a key was pressed (Non-blocking check)
+        if msvcrt.kbhit():
+            # 2. Read the key (blocking for microseconds only)
+            char = msvcrt.getwche() # getwche echoes the char to screen
+            
+            # Check for Enter key (\r)
+            if char == '\r':
+                print() # Print new line to make terminal look nice
+                full_cmd = "".join(cmd_buffer).strip()
+                cmd_buffer = [] # Clear buffer
+                
+                if full_cmd:
+                    print(f"[Local] Sending: {full_cmd}")
+                    await send_command_to_server(full_cmd)
+            
+            # Check for Backspace (\b)
+            elif char == '\b':
+                if cmd_buffer:
+                    cmd_buffer.pop()
+                    # Visual backspace hack (overwrite char with space then backspace again)
+                    sys.stdout.write(" \b") 
+            
+            # Normal character
+            else:
+                cmd_buffer.append(char)
+        
+        # 3. CRITICAL: Sleep to let Discord bot process network events
+        await asyncio.sleep(0.05)
 
 async def run_server_and_capture_output():
     global server_process
-    print(f"Launching: {SERVER_PATH}")
+    print(f"Launching Server: {SERVER_PATH}")
     
     try:
-        # Launch with a NEW CONSOLE so it has a buffer we can attach to
         server_process = subprocess.Popen(
             [SERVER_PATH] + SERVER_ARGS,
-            stdin=None,                 # Let it manage its own input
-            stdout=subprocess.PIPE,     # We still capture output via pipe
+            stdin=None,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NEW_CONSOLE, 
             universal_newlines=True,
@@ -146,11 +171,12 @@ async def run_server_and_capture_output():
             break
 
         try:
+            # We still use to_thread here as pipe reading is generally safe
             output = await asyncio.to_thread(server_process.stdout.readline)
             if output:
+                if "Terraria Server" not in output: 
+                    print(output.strip())
                 log_queue.append(output)
-                # Note: 'print' might fail if we are currently attached to the other console
-                # so we rely on Discord logs.
         except Exception as e:
             break
 
@@ -176,29 +202,26 @@ async def on_message(message):
 
     content = message.content.strip()
     command_text = content.lower()
-
-    # The command to send (either the command itself or a 'say' chat)
-    final_cmd = ""
     
     if command_text.startswith("!"):
         if command_text in ALLOWED_COMMANDS:
-            final_cmd = ALLOWED_COMMANDS[command_text]
+            terraria_cmd = ALLOWED_COMMANDS[command_text]
             await message.add_reaction("✅")
+            await send_command_to_server(terraria_cmd)
     else:
         clean_msg = content.replace("\n", " ").replace("\r", "")
-        final_cmd = f"say <Discord-{message.author.display_name}> {clean_msg}"
-
-    # INJECT THE INPUT IF WE HAVE A COMMAND
-    if final_cmd and server_process:
-        # We must add \r (Return) for the server to process the line
-        await asyncio.to_thread(inject_input, server_process.pid, final_cmd + "\r")
+        chat_cmd = f"say <Discord-{message.author.display_name}> {clean_msg}"
+        await send_command_to_server(chat_cmd)
 
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
     client.loop.create_task(run_server_and_capture_output())
     client.loop.create_task(send_logs_to_discord())
-    # read_local_console is disabled because console-hopping breaks local input
+    client.loop.create_task(read_local_console())
 
 if __name__ == "__main__":
-    client.run(TOKEN)
+    if not TOKEN:
+        print("Error: DISCORD_TOKEN missing from .env")
+    else:
+        client.run(TOKEN)
