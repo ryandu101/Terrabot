@@ -83,6 +83,8 @@ BLOCKED_PHRASES = [
     "Backing up world file",
     "Settling liquids",
     "127.0.0.1", # Hides local connection spam
+    "is connecting",
+    "was booted",
     ": Invalid command." # Hides error when bot types something wrong
 ]
 
