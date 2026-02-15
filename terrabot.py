@@ -85,6 +85,10 @@ BLOCKED_PHRASES = [
     "127.0.0.1", # Hides local connection spam
     "is connecting",
     "was booted",
+    "error logging enabled",
+    "Terraria Server",
+    "Listening on port",
+    "for a list of commands",
     ": Invalid command." # Hides error when bot types something wrong
 ]
 
