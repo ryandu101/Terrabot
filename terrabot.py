@@ -63,7 +63,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "inject":
 # ==========================================
 
 import discord
-import msvcrt # <--- REQUIRED for non-blocking input on Windows
+import msvcrt 
 
 # --- CONFIGURATION ---
 load_dotenv()
@@ -71,6 +71,20 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID', 0))
 SERVER_PATH = os.getenv('TERRARIA_EXE_PATH')
 SERVER_ARGS = ['-config', 'serverconfig.txt']
+
+# --- SPAM FILTER ---
+# Any line containing these phrases will NOT be sent to Discord.
+# Case-sensitive (usually), but the code checks simply "if phrase in line".
+BLOCKED_PHRASES = [
+    "Saving world data:",
+    "Resetting game objects",
+    "Loading world data",
+    "Validating world save:",
+    "Backing up world file",
+    "Settling liquids",
+    "127.0.0.1", # Hides local connection spam
+    ": Invalid command." # Hides error when bot types something wrong
+]
 
 ALLOWED_COMMANDS = {
     '!help': 'help',
@@ -110,42 +124,26 @@ async def send_command_to_server(cmd_text):
         print(f"Failed to spawn injector: {e}")
 
 async def read_local_console():
-    """
-    NON-BLOCKING INPUT READER using msvcrt.
-    This prevents the bot from freezing while waiting for you to type.
-    """
+    """Non-blocking input reader."""
     print(">>> Local Console Active. Type commands here. <<<")
-    
     cmd_buffer = []
     
     while True:
-        # 1. Check if a key was pressed (Non-blocking check)
         if msvcrt.kbhit():
-            # 2. Read the key (blocking for microseconds only)
-            char = msvcrt.getwche() # getwche echoes the char to screen
-            
-            # Check for Enter key (\r)
+            char = msvcrt.getwche() 
             if char == '\r':
-                print() # Print new line to make terminal look nice
+                print() 
                 full_cmd = "".join(cmd_buffer).strip()
-                cmd_buffer = [] # Clear buffer
-                
+                cmd_buffer = [] 
                 if full_cmd:
                     print(f"[Local] Sending: {full_cmd}")
                     await send_command_to_server(full_cmd)
-            
-            # Check for Backspace (\b)
             elif char == '\b':
                 if cmd_buffer:
                     cmd_buffer.pop()
-                    # Visual backspace hack (overwrite char with space then backspace again)
                     sys.stdout.write(" \b") 
-            
-            # Normal character
             else:
                 cmd_buffer.append(char)
-        
-        # 3. CRITICAL: Sleep to let Discord bot process network events
         await asyncio.sleep(0.05)
 
 async def run_server_and_capture_output():
@@ -175,12 +173,25 @@ async def run_server_and_capture_output():
             break
 
         try:
-            # We still use to_thread here as pipe reading is generally safe
             output = await asyncio.to_thread(server_process.stdout.readline)
             if output:
+                line = output.strip()
+                
+                # Print everything to local terminal so YOU see it
                 if "Terraria Server" not in output: 
-                    print(output.strip())
-                log_queue.append(output)
+                    print(line)
+                
+                # FILTER CHECK: Only add to queue if NOT blocked
+                # We check if any blocked phrase is inside the line
+                is_blocked = False
+                for phrase in BLOCKED_PHRASES:
+                    if phrase in line:
+                        is_blocked = True
+                        break
+                
+                if not is_blocked:
+                    log_queue.append(output)
+
         except Exception as e:
             break
 
